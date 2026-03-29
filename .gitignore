@@ -1,0 +1,26 @@
+# Секреты и локальные настройки
+.env
+.env.local
+.idea/
+.vscode/
+
+# Зависимости Node.js / React Native
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Артефакты Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.pytest_cache/
+
+# Сборки и логи
+build/
+dist/
+*.log
+helmets.yolov8/
+*.npy
+*.h5
