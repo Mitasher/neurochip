@@ -25,7 +25,7 @@ import time
 from data_loader import get_data_splits
 from tqdm import tqdm
 
-from utils import apply_keras_patches, evaluate_cnn, evaluate_snn, print_comparison
+from project_utils import apply_keras_patches, evaluate_cnn, evaluate_snn, print_comparison
 
 # Применяем патчи Keras
 apply_keras_patches()
