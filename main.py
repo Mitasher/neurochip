@@ -29,10 +29,10 @@ from data_loader import get_data_splits
 # ============================================================
 # Configuration
 # ============================================================
-IMAGE_SIZE = (64, 64)
+IMAGE_SIZE = (32, 32)
 NUM_CHANNELS = 1  # grayscale binary
 NUM_CLASSES = 2   # hat / person
-EPOCHS = 15
+EPOCHS = 10
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
 
@@ -50,12 +50,12 @@ def build_ternary_model():
     AltAI-2-compatible ternary CNN.
 
     Architecture:
-      Input (64×64×1, binary {0,1})
-        → TernaryConv2D(16, 3×3, stride=2, heaviside) + BN   # → 32×32×16
-        → TernaryConv2D(32, 3×3, stride=2, heaviside) + BN   # → 16×16×32
-        → TernaryConv2D(32, 3×3, stride=2, heaviside) + BN   # → 8×8×32
-        → Flatten                                              # → 2048
-        → TernaryDense(128, heaviside)
+      Input (32×32×1, binary {0,1})
+        → TernaryConv2D(7, 3×3, stride=2, heaviside) + BN    # → 16×16×7
+        → TernaryConv2D(15, 3×3, stride=2, heaviside) + BN   # → 8×8×15
+        → TernaryConv2D(15, 3×3, stride=1, heaviside) + BN   # → 8×8×15
+        → Flatten                                             # → 960 (60 neurons per class if dense is 120?)
+        → TernaryDense(64, heaviside)
         → TernaryDense(2, heaviside)
 
     All weights quantized to {-1, 0, 1}.
@@ -65,9 +65,9 @@ def build_ternary_model():
     model = models.Sequential([
         layers.Input(shape=(*IMAGE_SIZE, NUM_CHANNELS)),
 
-        # Conv block 1: 1→16 filters, stride=2 (64→32)
+        # Conv block 1: 1→7 filters, stride=2 (32→16)
         TernaryConv2D(
-            16, (3, 3),
+            7, (3, 3),
             strides=(2, 2),
             padding='same',
             activation=heaviside,
@@ -75,9 +75,9 @@ def build_ternary_model():
         ),
         layers.BatchNormalization(scale=False),
 
-        # Conv block 2: 16→32 filters, stride=2 (32→16)
+        # Conv block 2: 7→15 filters, stride=2 (16→8)
         TernaryConv2D(
-            32, (3, 3),
+            15, (3, 3),
             strides=(2, 2),
             padding='same',
             activation=heaviside,
@@ -85,19 +85,19 @@ def build_ternary_model():
         ),
         layers.BatchNormalization(scale=False),
 
-        # Conv block 3: 32→32 filters, stride=2 (16→8)
+        # Conv block 3: 15→15 filters, stride=1 (8→8)
         TernaryConv2D(
-            32, (3, 3),
-            strides=(2, 2),
+            15, (3, 3),
+            strides=(1, 1),
             padding='same',
             activation=heaviside,
             use_bias=True,
         ),
         layers.BatchNormalization(scale=False),
 
-        # Classifier head: Flatten → 8*8*32 = 2048
+        # Classifier head
         layers.Flatten(),
-        TernaryDense(128, activation=heaviside, use_bias=True),
+        TernaryDense(64, activation=heaviside, use_bias=True),
         TernaryDense(NUM_CLASSES, activation=heaviside, use_bias=True),
     ])
 
@@ -137,7 +137,18 @@ def train_and_save():
     )
 
     print(f"\nSaving model to {MODEL_PATH}")
-    model.save(MODEL_PATH, save_format='h5')
+    # Create an uncompiled clone to avoid Keras 3 serialization issues with losses/metrics
+    # Placer only needs architecture and weights.
+    model_for_placer = tf.keras.models.clone_model(model)
+    model_for_placer.set_weights(model.get_weights())
+    model_for_placer.save(MODEL_PATH, save_format='h5')
+
+    # Nuclear fix: Manually remove training_config from H5 to ensure it's uncompiled
+    import h5py
+    with h5py.File(MODEL_PATH, 'a') as f:
+        if 'training_config' in f.attrs:
+            del f.attrs['training_config']
+    print("Cleaned H5 metadata (removed training_config).")
 
     return model, x_val, y_val, y_val_oh, history
 

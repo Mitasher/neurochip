@@ -328,6 +328,13 @@ def main():
         'heaviside_mod': heaviside,
     }
     model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects)
+    
+    # Compile the model since it was saved uncompiled
+    model.compile(
+        optimizer='adam',
+        loss='categorical_crossentropy', # use MSE or whatever main.py used
+        metrics=['accuracy']
+    )
 
     # Benchmark CNN
     cnn_results = benchmark_cnn(
