@@ -91,8 +91,11 @@ def load_yolo_dataset(img_dir, label_dir, target_size=(64, 64), max_samples=5000
 
             crop = img[y1:y2, x1:x2]
             
-            # Save original color crop for visualization (resized to 256x256 for uniform shape)
-            orig_crop = cv2.resize(crop, (256, 256))
+            # Keep metadata for full image visualization
+            meta = {
+                'img_path': img_path,
+                'bbox': (x1, y1, x2, y2)
+            }
             
             crop = cv2.resize(crop, target_size)
 
@@ -106,14 +109,14 @@ def load_yolo_dataset(img_dir, label_dir, target_size=(64, 64), max_samples=5000
 
             images.append(binary)
             labels.append(cls)
-            orig_images.append(orig_crop)
+            orig_images.append(meta)
             count += 1
             if count >= max_samples:
                 break
 
     images = np.array(images)
     labels = np.array(labels)
-    orig_images = np.array(orig_images)
+    orig_images = np.array(orig_images, dtype=object)
 
     # Balance classes
     idx0 = np.where(labels == 0)[0]
@@ -161,5 +164,5 @@ if __name__ == "__main__":
     np.save("y_train.npy", y_train)
     np.save("x_val.npy", x_val)
     np.save("y_val.npy", y_val)
-    np.save("orig_x_train.npy", orig_x_train)
-    np.save("orig_x_val.npy", orig_x_val)
+    np.save("orig_x_train.npy", orig_x_train, allow_pickle=True)
+    np.save("orig_x_val.npy", orig_x_val, allow_pickle=True)

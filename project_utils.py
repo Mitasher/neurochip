@@ -50,10 +50,9 @@ def apply_keras_patches():
 # ============================================================
 # Visualization
 # ============================================================
-def save_visual_results(orig_images, y_true, y_pred, model_type, save_dir="visual_results", num_samples=20):
+def save_visual_results(orig_images, y_true, y_pred, model_type, latencies=None, save_dir="visual_results", num_samples=20):
     """
-    Сохраняет предсказания модели в виде картинок.
-    Зеленый текст - правильное предсказание, Красный - ошибка.
+    Сохраняет предсказания модели в виде квадратов на целой картинке + метаинфа.
     """
     if orig_images is None:
         return
@@ -64,8 +63,13 @@ def save_visual_results(orig_images, y_true, y_pred, model_type, save_dir="visua
     indices = np.random.choice(len(orig_images), min(num_samples, len(orig_images)), replace=False)
 
     for i, idx in enumerate(indices):
-        # Используем оригинальные цветные кропы 256x256 вместо бинарных 32x32
-        img_bgr = orig_images[idx].copy()
+        meta = orig_images[idx]
+        img_path = meta['img_path']
+        x1, y1, x2, y2 = meta['bbox']
+        
+        img_bgr = cv2.imread(img_path)
+        if img_bgr is None:
+            continue
 
         t_lbl = int(y_true[idx])
         p_lbl = int(y_pred[idx])
@@ -75,14 +79,28 @@ def save_visual_results(orig_images, y_true, y_pred, model_type, save_dir="visua
 
         color = (0, 255, 0) if t_lbl == p_lbl else (0, 0, 255) 
 
-        text = f"T: {true_name} | P: {pred_name}"
-        cv2.putText(img_bgr, text, (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # Рисуем квадрат
+        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, 3)
 
-        status = 'ok' if t_lbl == p_lbl else 'err'
-        filename = os.path.join(save_dir, f"{model_type}_{status}_{i}.png")
+        # Текст (метаинформация)
+        status = 'MATCH' if t_lbl == p_lbl else 'MISMATCH'
+        latency_str = f" Latency: {latencies[idx]:.1f}ms" if latencies is not None else ""
+        text_lines = [
+            f"Model: {model_type} [{status}]",
+            f"Truth: {true_name} | Pred: {pred_name}",
+            f"BBox: ({x1},{y1}) -> ({x2},{y2}){latency_str}"
+        ]
+
+        text_y = max(30, y1 - 20)
+        for j, line in enumerate(reversed(text_lines)):
+            cv2.putText(img_bgr, line, (max(10, x1), text_y - j*25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
+            cv2.putText(img_bgr, line, (max(10, x1), text_y - j*25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        file_status = 'ok' if t_lbl == p_lbl else 'err'
+        filename = os.path.join(save_dir, f"{model_type}_{file_status}_{i}.png")
         cv2.imwrite(filename, img_bgr)
         
-    print(f"\n[+] Сохранено {num_samples} картинок с предсказаниями {model_type} в {save_dir}/")
+    print(f"\n[+] Сохранено {num_samples} картинок с предсказаниями {model_type} (на целых изображениях) в {save_dir}/")
 
 
 # ============================================================
@@ -142,7 +160,7 @@ def evaluate_cnn(model, x_test, y_test, num_classes, warmup=0, orig_images=None)
     predictions = np.array(predictions)
 
     if orig_images is not None:
-        save_visual_results(orig_images, y_test, predictions, model_type="CNN")
+        save_visual_results(orig_images, y_test, predictions, model_type="CNN", latencies=latencies)
 
     per_class_correct = {}
     per_class_total = {}
@@ -238,7 +256,7 @@ def evaluate_snn(x_test, y_test, snn_config_path, num_classes, num_ticks=100, wa
     predictions = np.array(predictions)
     
     if orig_images is not None:
-        save_visual_results(orig_images[indices], y_test[indices], predictions, model_type="SNN")
+        save_visual_results(orig_images[indices], y_test[indices], predictions, model_type="SNN", latencies=latencies)
     
     acc = correct / num_samples
 
