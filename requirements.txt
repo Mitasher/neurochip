@@ -14,8 +14,8 @@ h5py==3.16.0
 idna==3.7
 keras==3.13.2
 kiwisolver==1.5.0
-knp @ file:///home/alpo/%D0%A0%D0%B0%D0%B1%D0%BE%D1%87%D0%B8%D0%B9%20%D1%81%D1%82%D0%BE%D0%BB/project/knp-test/knp-2.0.0-py3-none-any.whl#sha256=4714e7d11e0694820550c9c30406d566e7461e3ecd2e9e1c6dd8783139b5def2
-knp_ann2snn_x86_64 @ file:///home/alpo/%D0%A0%D0%B0%D0%B1%D0%BE%D1%87%D0%B8%D0%B9%20%D1%81%D1%82%D0%BE%D0%BB/project/knp-test/knp_ann2snn_x86_64-0.0.1-py3-none-any.whl#sha256=480015cfd8a337d1633b47f071fc1d25b90737c30d92292b9bbbba8c0ab5c083
+./knp-2.0.0-py3-none-any.whl
+./knp_ann2snn_x86_64-0.0.1-py3-none-any.whl
 libclang==18.1.1
 loguru==0.7.2
 Markdown==3.10.2
@@ -27,8 +27,9 @@ ml-dtypes==0.3.2
 namex==0.1.0
 networkx==3.1
 numpy==1.26.4
-opencv-python==4.13.0.92
-opencv-python-headless==4.10.0.84
+opencv-python
+opencv-python-headless
+roboflow
 opt_einsum==3.4.0
 optree==0.19.0
 packaging==26.0
@@ -44,7 +45,6 @@ PyYAML==6.0.2
 requests==2.33.0
 requests-toolbelt==1.0.0
 rich==14.3.3
-roboflow==1.2.16
 setuptools==82.0.1
 six==1.17.0
 tensorboard==2.16.2

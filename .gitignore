@@ -22,5 +22,8 @@ build/
 dist/
 *.log
 helmets.yolov8/
+visual_results/
 *.npy
 *.h5
+*.whl
+*.json

@@ -9,6 +9,7 @@ Usage:
 """
 
 import os
+import cv2
 import sys
 import json
 import time
@@ -17,22 +18,81 @@ import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
+from tqdm import tqdm
 
 from knp_ann2snn.altainn.ternary_tf2 import TernaryConv2D, TernaryDense, heaviside
 from knp_ann2snn.python_altai import Altai
 from data_loader import get_data_splits
 
+# === ДОБАВИТЬ ВОТ ЭТОТ БЛОК ===
+from tensorflow.keras.saving import register_keras_serializable
+from knp_ann2snn.altainn.ternary_tf2.ops import Clip
+
+# Регистрируем функции активации
+register_keras_serializable(name="heaviside_mod")(heaviside)
+register_keras_serializable(name="heaviside")(heaviside)
+
+# Регистрируем слои
+register_keras_serializable(name="TernaryConv2D")(TernaryConv2D)
+register_keras_serializable(name="TernaryDense")(TernaryDense)
+
+# Регистрируем кастомное ограничение весов
+register_keras_serializable(name="Clip")(Clip)
+# ==============================
+
 
 # ============================================================
 # Configuration
 # ============================================================
-IMAGE_SIZE = (64, 64)
+IMAGE_SIZE = (32, 32)
 NUM_CLASSES = 2
 MODEL_PATH = 'helmet_ternary_model.h5'
 SNN_CONFIG_PATH = 'helmet_snn_config.json'
 IMG_DIR = "helmets.yolov8/train/images"
 LBL_DIR = "helmets.yolov8/train/labels"
 REPORT_PATH = 'benchmark_report.json'
+
+def save_visual_results(x_data, y_true, y_pred, model_type, save_dir="visual_results", num_samples=20):
+    """
+    Сохраняет предсказания модели в виде картинок.
+    Зеленый текст - правильное предсказание, Красный - ошибка.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    # Классы согласно вашей функции load_yolo_dataset
+    class_names = {0: 'Hat', 1: 'Person'} 
+
+    # Выбираем случайные индексы для сохранения
+    indices = np.random.choice(len(x_data), min(num_samples, len(x_data)), replace=False)
+
+    for i, idx in enumerate(indices):
+        # x_data имеет значения {0.0, 1.0} и размер (H, W, 1)
+        img = x_data[idx] 
+        
+        # Переводим обратно в 0-255 и конвертируем в 3 канала для цветного текста
+        img_bgr = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+        # Увеличиваем картинку, чтобы текст был читаемым (оригинал 32x32 или 64x64 слишком мал)
+        img_bgr = cv2.resize(img_bgr, (256, 256), interpolation=cv2.INTER_NEAREST)
+
+        t_lbl = int(y_true[idx])
+        p_lbl = int(y_pred[idx])
+        
+        true_name = class_names.get(t_lbl, str(t_lbl))
+        pred_name = class_names.get(p_lbl, str(p_lbl))
+
+        # Логика цвета: BGR формат (Синий, Зеленый, Красный)
+        color = (0, 255, 0) if t_lbl == p_lbl else (0, 0, 255) 
+
+        text = f"T: {true_name} | P: {pred_name}"
+        cv2.putText(img_bgr, text, (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # Формируем имя файла (ok/err позволяет быстро отсортировать ошибки в папке)
+        status = 'ok' if t_lbl == p_lbl else 'err'
+        filename = os.path.join(save_dir, f"{model_type}_{status}_{i}.png")
+        cv2.imwrite(filename, img_bgr)
+        
+    print(f"\n[+] Сохранено {num_samples} картинок с предсказаниями {model_type} в {save_dir}/")
+
 
 
 # ============================================================
@@ -41,18 +101,6 @@ REPORT_PATH = 'benchmark_report.json'
 def benchmark_cnn(model, x_test, y_test, warmup=5):
     """
     Benchmark CNN inference: accuracy + detailed latency stats.
-
-    Parameters
-    ----------
-    model : tf.keras.Model
-    x_test : np.ndarray
-    y_test : np.ndarray
-    warmup : int
-        Number of warmup iterations (excluded from timing).
-
-    Returns
-    -------
-    dict with metrics
     """
     print("\n" + "=" * 60)
     print("Benchmarking CNN...")
@@ -70,6 +118,7 @@ def benchmark_cnn(model, x_test, y_test, warmup=5):
     # Per-sample latency
     latencies = []
     predictions = []
+    
     for i in range(len(x_test)):
         sample = x_test[i:i + 1]
         t0 = time.perf_counter()
@@ -81,9 +130,13 @@ def benchmark_cnn(model, x_test, y_test, warmup=5):
     latencies = np.array(latencies)
     predictions = np.array(predictions)
 
+    # СОХРАНЯЕМ КАРТИНКИ
+    save_visual_results(x_test, y_test, predictions, model_type="CNN")
+
     # Confusion-style stats
     per_class_correct = {}
     per_class_total = {}
+    
     for cls in range(NUM_CLASSES):
         mask = y_test == cls
         per_class_total[str(cls)] = int(mask.sum())
@@ -122,18 +175,6 @@ def benchmark_cnn(model, x_test, y_test, warmup=5):
 def benchmark_snn(x_test, y_test, num_ticks=100, warmup=5, num_samples=None):
     """
     Benchmark SNN inference on Altai golden model.
-
-    Parameters
-    ----------
-    x_test : np.ndarray
-    y_test : np.ndarray
-    num_ticks : int
-    warmup : int
-    num_samples : int or None
-
-    Returns
-    -------
-    dict with metrics
     """
     print("\n" + "=" * 60)
     print(f"Benchmarking SNN ({num_ticks} ticks)...")
@@ -144,7 +185,7 @@ def benchmark_snn(x_test, y_test, num_ticks=100, warmup=5, num_samples=None):
         return None
 
     altai = Altai()
-    altai.build(config_path=Path(SNN_CONFIG_PATH), inference_type='gm')
+    altai.build(config_path=str(Path(SNN_CONFIG_PATH)), inference_type='gm')
 
     if num_samples is None:
         num_samples = len(x_test)
@@ -166,7 +207,7 @@ def benchmark_snn(x_test, y_test, num_ticks=100, warmup=5, num_samples=None):
     latencies = []
     predictions = []
 
-    for idx in indices:
+    for idx in tqdm(indices, desc="Simulating SNN"):
         inp = x_test[idx].astype(np.int32)
 
         t0 = time.perf_counter()
@@ -180,8 +221,13 @@ def benchmark_snn(x_test, y_test, num_ticks=100, warmup=5, num_samples=None):
         prediction = 0
         if len(spikes) > 0:
             flat = spikes.flatten().astype(int)
-            counts = np.bincount(flat, minlength=NUM_CLASSES)
-            prediction = int(np.argmax(counts))
+            # Отфильтровываем отрицательные значения (индикаторы "тишины")
+            valid_spikes = flat[flat >= 0]
+            
+            # Считаем бины только если остались валидные спайки
+            if len(valid_spikes) > 0:
+                counts = np.bincount(valid_spikes, minlength=NUM_CLASSES)
+                prediction = int(np.argmax(counts))
 
         predictions.append(prediction)
         if prediction == int(y_test[idx]):
@@ -191,6 +237,10 @@ def benchmark_snn(x_test, y_test, num_ticks=100, warmup=5, num_samples=None):
 
     latencies = np.array(latencies)
     predictions = np.array(predictions)
+    
+    # СОХРАНЯЕМ КАРТИНКИ
+    save_visual_results(x_test[indices], y_test[indices], predictions, model_type="SNN")
+    
     acc = correct / num_samples
 
     # Per-class stats
@@ -306,7 +356,7 @@ def main():
         help='Number of samples to evaluate (default: all)'
     )
     parser.add_argument(
-        '--num-ticks', type=int, default=100,
+        '--num-ticks', type=int, default=40,
         help='Number of SNN simulation ticks (default: 100)'
     )
     parser.add_argument(
@@ -357,6 +407,7 @@ def main():
     else:
         print("\nSNN benchmark skipped (config not found).")
         save_report(cnn_results, {})
+
 
 
 if __name__ == "__main__":

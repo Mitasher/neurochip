@@ -17,14 +17,57 @@ import os
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from knp_ann2snn.altainn.ternary_tf2 import (
-    TernaryConv2D, TernaryDense, heaviside
-)
+
+# ============================================================
+# OFFLINE PATCH: Keras 2 to Keras 3 add_weight bridge
+# ============================================================
+_original_add_weight = layers.Layer.add_weight
+
+def _patched_add_weight(self, *args, **kwargs):
+    # If the first argument is a string (name), shift it to kwargs
+    if len(args) > 0 and isinstance(args[0], str):
+        name = args[0]
+        args = args[1:]
+        kwargs['name'] = name
+    return _original_add_weight(self, *args, **kwargs)
+
+layers.Layer.add_weight = _patched_add_weight
+# ============================================================
+
+from knp_ann2snn.altainn.ternary_tf2 import TernaryConv2D, TernaryDense, heaviside
 from knp_ann2snn import Placer
 from knp_ann2snn.python_altai import Altai
 from pathlib import Path
 import time
 from data_loader import get_data_splits
+from tqdm import tqdm
+
+# ============================================================
+# OFFLINE PATCH 2: Register custom objects for Keras 3
+# ============================================================
+from tensorflow.keras.saving import register_keras_serializable
+from knp_ann2snn.altainn.ternary_tf2.ops import Clip
+
+# Register the activation function
+register_keras_serializable(name="heaviside_mod")(heaviside)
+register_keras_serializable(name="heaviside")(heaviside)
+
+# Register the layers
+register_keras_serializable(name="TernaryConv2D")(TernaryConv2D)
+register_keras_serializable(name="TernaryDense")(TernaryDense)
+
+# Register the custom weight constraint
+register_keras_serializable(name="Clip")(Clip)
+# ============================================================
+
+# ============================================================
+# OFFLINE PATCH 3: Safely handle Placer's bias lookup
+# ============================================================
+# Since we use_bias=False, we safely return None when Placer
+# asks for the bias attribute, bypassing the Keras 3 sorting bug.
+TernaryConv2D.bias = property(lambda self: None)
+TernaryDense.bias = property(lambda self: None)
+# ============================================================
 
 # ============================================================
 # Configuration
@@ -46,68 +89,39 @@ LBL_DIR = "helmets.yolov8/train/labels"
 # Model
 # ============================================================
 def build_ternary_model():
-    """
-    AltAI-2-compatible ternary CNN.
+    inputs = layers.Input(shape=(*IMAGE_SIZE, NUM_CHANNELS))
 
-    Architecture:
-      Input (32×32×1, binary {0,1})
-        → TernaryConv2D(7, 3×3, stride=2, heaviside) + BN    # → 16×16×7
-        → TernaryConv2D(15, 3×3, stride=2, heaviside) + BN   # → 8×8×15
-        → TernaryConv2D(15, 3×3, stride=1, heaviside) + BN   # → 8×8×15
-        → Flatten                                             # → 960 (60 neurons per class if dense is 120?)
-        → TernaryDense(64, heaviside)
-        → TernaryDense(2, heaviside)
+    # Слой 1: 32x32 -> 16x16
+    x = TernaryConv2D(
+        16, (3, 3), strides=(2, 2), padding='same', 
+        activation=heaviside, use_bias=False
+    )(inputs)
 
-    All weights quantized to {-1, 0, 1}.
-    All inter-layer activations are binary {0, 1} via heaviside.
-    Loss = MSE with one-hot labels.
-    """
-    model = models.Sequential([
-        layers.Input(shape=(*IMAGE_SIZE, NUM_CHANNELS)),
+    # Слой 2: 16x16 -> 8x8
+    x = TernaryConv2D(
+        32, (3, 3), strides=(2, 2), padding='same', 
+        activation=heaviside, use_bias=False
+    )(x)
 
-        # Conv block 1: 1→7 filters, stride=2 (32→16)
-        TernaryConv2D(
-            7, (3, 3),
-            strides=(2, 2),
-            padding='same',
-            activation=heaviside,
-            use_bias=True,
-        ),
-        layers.BatchNormalization(scale=False),
+    # Слой 3: 8x8 -> 4x4 (сжимаем, чтобы влезть в лимиты Placer)
+    x = TernaryConv2D(
+        16, (3, 3), strides=(2, 2), padding='same', 
+        activation=heaviside, use_bias=False
+    )(x)
 
-        # Conv block 2: 7→15 filters, stride=2 (16→8)
-        TernaryConv2D(
-            15, (3, 3),
-            strides=(2, 2),
-            padding='same',
-            activation=heaviside,
-            use_bias=True,
-        ),
-        layers.BatchNormalization(scale=False),
+    # Голова классификатора
+    x = layers.Flatten()(x)
+    x = TernaryDense(128, activation=heaviside, use_bias=False)(x)
+    outputs = TernaryDense(NUM_CLASSES, activation=heaviside, use_bias=False)(x)
 
-        # Conv block 3: 15→15 filters, stride=1 (8→8)
-        TernaryConv2D(
-            15, (3, 3),
-            strides=(1, 1),
-            padding='same',
-            activation=heaviside,
-            use_bias=True,
-        ),
-        layers.BatchNormalization(scale=False),
-
-        # Classifier head
-        layers.Flatten(),
-        TernaryDense(64, activation=heaviside, use_bias=True),
-        TernaryDense(NUM_CLASSES, activation=heaviside, use_bias=True),
-    ])
+    model = models.Model(inputs=inputs, outputs=outputs)
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss='mse',
+        loss='mse', # Возвращаем MSE для стабильности с Heaviside
         metrics=['accuracy'],
     )
     return model
-
 
 # ============================================================
 # Training
@@ -129,11 +143,26 @@ def train_and_save():
     model.summary()
 
     print("\nStarting training...")
+    
+    # Коллбэки для контроля обучения
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor='val_accuracy', 
+        patience=20, # ждем 20 эпох, если нет улучшений - стоп
+        restore_best_weights=True # откатываемся к лучшей эпохе
+    )
+    lr_decay = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss', 
+        factor=0.5, # уменьшаем LR в 2 раза
+        patience=5, # если loss не падает 5 эпох
+        min_lr=1e-5
+    )
+
     history = model.fit(
         x_train, y_train_oh,
-        epochs=EPOCHS,
+        epochs=100, # Увеличили со 10 до 100
         validation_data=(x_val, y_val_oh),
         batch_size=BATCH_SIZE,
+        callbacks=[early_stop, lr_decay] # Добавили коллбэки
     )
 
     print(f"\nSaving model to {MODEL_PATH}")
@@ -260,7 +289,7 @@ def evaluate_snn(x_test, y_test, num_ticks=100, num_samples=None):
         return None
 
     altai = Altai()
-    altai.build(config_path=Path(config_to_load), inference_type='gm')
+    altai.build(config_path=str(Path(config_to_load)), inference_type='gm')
 
     if num_samples is None:
         num_samples = len(x_test)
@@ -273,7 +302,7 @@ def evaluate_snn(x_test, y_test, num_ticks=100, num_samples=None):
     correct = 0
     latencies = []
 
-    for i in subset_indices:
+    for i in tqdm(subset_indices, desc="Simulating SNN"):
         # Altai expects int32 spikes
         input_data = x_test[i].astype(np.int32)
 
@@ -289,7 +318,16 @@ def evaluate_snn(x_test, y_test, num_ticks=100, num_samples=None):
         prediction = 0
         if len(spikes) > 0:
             flat = spikes.flatten().astype(int)
-            counts = np.bincount(flat, minlength=NUM_CLASSES)
+            # Convert to a numpy array if it isn't already
+            flat_arr = np.array(flat)
+
+            # Filter out the negative values (the "no spike" / silence indicators)
+            valid_spikes = flat_arr[flat_arr >= 0].astype(int)
+
+            # Now count the valid spikes. If the array is empty, bincount will just return all zeros.
+            counts = np.bincount(valid_spikes, minlength=NUM_CLASSES)
+
+            # Note: If counts is all zeros, np.argmax(counts) will default to predicting class 0.
             prediction = int(np.argmax(counts))
 
         if prediction == int(y_test[i]):
@@ -334,6 +372,8 @@ if __name__ == "__main__":
     cnn_results = evaluate_cnn(model, x_val, y_val)
 
     # 4. Evaluate SNN
+    import numpy as np
+
     snn_results = evaluate_snn(x_val, y_val, num_ticks=100)
 
     # 5. Summary
