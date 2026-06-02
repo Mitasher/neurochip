@@ -27,3 +27,7 @@ visual_results/
 *.h5
 *.whl
 *.json
+
+# SEU project: тяжёлые/регенерируемые артефакты
+.altai_cache/          # placed AltAI-конфиги (сотни МБ)
+results/               # JSON-отчёты и PNG-графики эксперимента
